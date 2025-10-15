@@ -35,6 +35,8 @@ import (
 	"github.com/firebase/genkit/go/core/logger"
 	"github.com/firebase/genkit/go/core/tracing"
 	"github.com/firebase/genkit/go/internal"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	tracepkg "go.opentelemetry.io/otel/trace"
 )
 
 type streamingCallback[Stream any] = func(context.Context, Stream) error
@@ -53,6 +55,7 @@ type runtimeFileData struct {
 type reflectionServer struct {
 	*http.Server
 	RuntimeFilePath string // Path to the runtime file that was written at startup.
+	TracerProvider  tracepkg.TracerProvider
 }
 
 // findAvailablePort finds the next available port starting from the given port number.
@@ -89,11 +92,15 @@ func startReflectionServer(ctx context.Context, g *Genkit, errCh chan<- error, s
 		}
 	}
 
+	// Create an isolated tracer provider for the reflection server so it doesn't conflict with the global provider.
+	tp := sdktrace.NewTracerProvider()
+
 	s := &reflectionServer{
 		Server: &http.Server{
 			Addr:    addr,
-			Handler: serveMux(g),
+			Handler: serveMux(g, tp),
 		},
+		TracerProvider: tp,
 	}
 
 	slog.Debug("starting reflection server", "addr", s.Addr)
@@ -238,22 +245,28 @@ func findProjectRoot() (string, error) {
 }
 
 // serveMux returns a new ServeMux configured for the required Reflection API endpoints.
-func serveMux(g *Genkit) *http.ServeMux {
+func serveMux(g *Genkit, tp tracepkg.TracerProvider) *http.ServeMux {
 	mux := http.NewServeMux()
 	// Skip wrapHandler here to avoid logging constant polling requests.
 	mux.HandleFunc("GET /api/__health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("GET /api/actions", wrapReflectionHandler(handleListActions(g)))
-	mux.HandleFunc("POST /api/runAction", wrapReflectionHandler(handleRunAction(g)))
-	mux.HandleFunc("POST /api/notify", wrapReflectionHandler(handleNotify()))
+	mux.HandleFunc("GET /api/actions", wrapReflectionHandler(tp, handleListActions(g)))
+	mux.HandleFunc("POST /api/runAction", wrapReflectionHandler(tp, handleRunAction(g)))
+	mux.HandleFunc("POST /api/notify", wrapReflectionHandler(tp, handleNotify(tp)))
+
+	// TODO: make reflection have its own OTEL instance to avoid conflicting with the one from the host application.
+
 	return mux
 }
 
 // wrapReflectionHandler wraps an HTTP handler function with common logging and error handling.
-func wrapReflectionHandler(h func(w http.ResponseWriter, r *http.Request) error) http.HandlerFunc {
+func wrapReflectionHandler(tp tracepkg.TracerProvider, h func(w http.ResponseWriter, r *http.Request) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		// Inject the reflection tracer provider into the request context so spans use the isolated provider.
+		ctx = tracing.ContextWithTracerProvider(ctx, tp)
+		r = r.WithContext(ctx)
 		logger.FromContext(ctx).Debug("request start", "method", r.Method, "path", r.URL.Path)
 
 		var err error
@@ -354,7 +367,7 @@ func handleRunAction(g *Genkit) func(w http.ResponseWriter, r *http.Request) err
 }
 
 // handleNotify configures the telemetry server URL from the request.
-func handleNotify() func(w http.ResponseWriter, r *http.Request) error {
+func handleNotify(tp tracepkg.TracerProvider) func(w http.ResponseWriter, r *http.Request) error {
 	return func(w http.ResponseWriter, r *http.Request) error {
 		var body struct {
 			TelemetryServerURL       string `json:"telemetryServerUrl"`
@@ -367,7 +380,8 @@ func handleNotify() func(w http.ResponseWriter, r *http.Request) error {
 		}
 
 		if os.Getenv("GENKIT_TELEMETRY_SERVER") == "" && body.TelemetryServerURL != "" {
-			tracing.WriteTelemetryImmediate(tracing.NewHTTPTelemetryClient(body.TelemetryServerURL))
+			// Attach telemetry exporter to the reflection tracer provider only.
+			tracing.WriteTelemetryImmediateOn(tp, tracing.NewHTTPTelemetryClient(body.TelemetryServerURL))
 			slog.Debug("connected to telemetry server", "url", body.TelemetryServerURL)
 		}
 
