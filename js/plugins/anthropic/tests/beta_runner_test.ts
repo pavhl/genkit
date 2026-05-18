@@ -24,9 +24,8 @@ import { createMockAnthropicClient } from './mocks/anthropic-client.js';
 describe('BetaRunner.toAnthropicMessageContent', () => {
   function createRunner() {
     return new BetaRunner({
-      name: 'anthropic/claude-3-5-haiku',
+      name: 'anthropic/claude-haiku-4-5',
       client: createMockAnthropicClient(),
-      cacheSystemPrompt: false,
     });
   }
 
@@ -321,7 +320,7 @@ describe('BetaRunner', () => {
     const toolPart = exposed.toGenkitPart(serverToolEvent);
     assert.deepStrictEqual(toolPart, {
       text: '[Anthropic server tool srv/myTool] input: {"foo":"bar"}',
-      custom: {
+      metadata: {
         anthropicServerToolUse: {
           id: 'toolu_test',
           name: 'srv/myTool',
@@ -458,9 +457,8 @@ describe('BetaRunner', () => {
   it('should build request bodies with optional config fields', () => {
     const mockClient = createMockAnthropicClient();
     const runner = new BetaRunner({
-      name: 'claude-3-5-haiku',
+      name: 'claude-haiku-4-5',
       client: mockClient as Anthropic,
-      cacheSystemPrompt: true,
     }) as any;
 
     const request = {
@@ -494,12 +492,12 @@ describe('BetaRunner', () => {
     } satisfies any;
 
     const body = runner.toAnthropicRequestBody(
-      'claude-3-5-haiku',
+      'claude-haiku-4-5',
       request,
       true
     );
 
-    assert.strictEqual(body.model, 'claude-3-5-haiku-20241022');
+    assert.strictEqual(body.model, 'claude-haiku-4-5');
     assert.ok(Array.isArray(body.system));
     assert.strictEqual(body.max_tokens, 128);
     assert.strictEqual(body.top_k, 4);
@@ -518,7 +516,7 @@ describe('BetaRunner', () => {
     });
 
     const streamingBody = runner.toAnthropicStreamingRequestBody(
-      'claude-3-5-haiku',
+      'claude-haiku-4-5',
       request,
       true
     );
@@ -530,7 +528,7 @@ describe('BetaRunner', () => {
     });
 
     const disabledBody = runner.toAnthropicRequestBody(
-      'claude-3-5-haiku',
+      'claude-haiku-4-5',
       {
         messages: [],
         config: {
@@ -542,81 +540,10 @@ describe('BetaRunner', () => {
     assert.deepStrictEqual(disabledBody.thinking, { type: 'disabled' });
   });
 
-  it('should concatenate multiple text parts in system message', () => {
-    const mockClient = createMockAnthropicClient();
-    const runner = new BetaRunner({
-      name: 'claude-3-5-haiku',
-      client: mockClient as Anthropic,
-    }) as any;
-
-    const request = {
-      messages: [
-        {
-          role: 'system',
-          content: [
-            { text: 'You are a helpful assistant.' },
-            { text: 'Always be concise.' },
-            { text: 'Use proper grammar.' },
-          ],
-        },
-        { role: 'user', content: [{ text: 'Hi' }] },
-      ],
-      output: { format: 'text' },
-    } satisfies any;
-
-    const body = runner.toAnthropicRequestBody(
-      'claude-3-5-haiku',
-      request,
-      false
-    );
-
-    assert.strictEqual(
-      body.system,
-      'You are a helpful assistant.\n\nAlways be concise.\n\nUse proper grammar.'
-    );
-  });
-
-  it('should concatenate multiple text parts in system message with caching', () => {
-    const mockClient = createMockAnthropicClient();
-    const runner = new BetaRunner({
-      name: 'claude-3-5-haiku',
-      client: mockClient as Anthropic,
-    }) as any;
-
-    const request = {
-      messages: [
-        {
-          role: 'system',
-          content: [
-            { text: 'You are a helpful assistant.' },
-            { text: 'Always be concise.' },
-          ],
-        },
-        { role: 'user', content: [{ text: 'Hi' }] },
-      ],
-      output: { format: 'text' },
-    } satisfies any;
-
-    const body = runner.toAnthropicRequestBody(
-      'claude-3-5-haiku',
-      request,
-      true
-    );
-
-    assert.ok(Array.isArray(body.system));
-    assert.deepStrictEqual(body.system, [
-      {
-        type: 'text',
-        text: 'You are a helpful assistant.\n\nAlways be concise.',
-        cache_control: { type: 'ephemeral' },
-      },
-    ]);
-  });
-
   it('should throw error if system message contains media', () => {
     const mockClient = createMockAnthropicClient();
     const runner = new BetaRunner({
-      name: 'claude-3-5-haiku',
+      name: 'claude-haiku-4-5',
       client: mockClient as Anthropic,
     }) as any;
 
@@ -640,7 +567,7 @@ describe('BetaRunner', () => {
     } satisfies any;
 
     assert.throws(
-      () => runner.toAnthropicRequestBody('claude-3-5-haiku', request, false),
+      () => runner.toAnthropicRequestBody('claude-haiku-4-5', request, false),
       /System messages can only contain text content/
     );
   });
@@ -648,7 +575,7 @@ describe('BetaRunner', () => {
   it('should throw error if system message contains tool requests', () => {
     const mockClient = createMockAnthropicClient();
     const runner = new BetaRunner({
-      name: 'claude-3-5-haiku',
+      name: 'claude-haiku-4-5',
       client: mockClient as Anthropic,
     }) as any;
 
@@ -667,7 +594,7 @@ describe('BetaRunner', () => {
     } satisfies any;
 
     assert.throws(
-      () => runner.toAnthropicRequestBody('claude-3-5-haiku', request, false),
+      () => runner.toAnthropicRequestBody('claude-haiku-4-5', request, false),
       /System messages can only contain text content/
     );
   });
@@ -675,7 +602,7 @@ describe('BetaRunner', () => {
   it('should throw error if system message contains tool responses', () => {
     const mockClient = createMockAnthropicClient();
     const runner = new BetaRunner({
-      name: 'claude-3-5-haiku',
+      name: 'claude-haiku-4-5',
       client: mockClient as Anthropic,
     }) as any;
 
@@ -694,9 +621,81 @@ describe('BetaRunner', () => {
     } satisfies any;
 
     assert.throws(
-      () => runner.toAnthropicRequestBody('claude-3-5-haiku', request, false),
+      () => runner.toAnthropicRequestBody('claude-haiku-4-5', request, false),
       /System messages can only contain text content/
     );
+  });
+
+  it('should not leak maxOutputTokens, stopSequences, version, or apiKey into the request body', () => {
+    const mockClient = createMockAnthropicClient();
+    const runner = new BetaRunner({
+      name: 'claude-haiku-4-5',
+      client: mockClient as Anthropic,
+    }) as any;
+
+    const body = runner.toAnthropicRequestBody(
+      'claude-haiku-4-5',
+      {
+        messages: [],
+        config: {
+          maxOutputTokens: 100,
+          stopSequences: ['END'],
+          version: 'claude-haiku-4-5-custom',
+          apiKey: 'fake-api-key',
+          temperature: 0.5,
+        },
+      } satisfies any,
+      false
+    );
+
+    assert.deepStrictEqual(body, {
+      model: 'claude-haiku-4-5-custom',
+      max_tokens: 100,
+      messages: [],
+      stop_sequences: ['END'],
+      temperature: 0.5,
+      betas: [
+        'files-api-2025-04-14',
+        'effort-2025-11-24',
+        'structured-outputs-2025-11-13',
+        'task-budgets-2026-03-13',
+      ],
+    });
+  });
+
+  it('should support Claude Opus 4.7 adaptive thinking and task budgets', () => {
+    const mockClient = createMockAnthropicClient();
+    const runner = new BetaRunner({
+      name: 'claude-opus-4-7',
+      client: mockClient as Anthropic,
+    }) as any;
+
+    const request = {
+      messages: [{ role: 'user', content: [{ text: 'Refactor this.' }] }],
+      output: { format: 'text' },
+      config: {
+        thinking: { adaptive: true, display: 'summarized' },
+        output_config: {
+          effort: 'xhigh',
+          task_budget: { type: 'tokens', total: 64000 },
+        },
+      },
+    } satisfies any;
+
+    const body = runner.toAnthropicRequestBody(
+      'claude-opus-4-7',
+      request,
+      false
+    );
+
+    assert.deepStrictEqual(body.thinking, {
+      type: 'adaptive',
+      display: 'summarized',
+    });
+    assert.deepStrictEqual(body.output_config, {
+      effort: 'xhigh',
+      task_budget: { type: 'tokens', total: 64000 },
+    });
   });
 
   it('should throw for unsupported mcp tool use blocks', () => {
@@ -732,7 +731,7 @@ describe('BetaRunner', () => {
     });
     assert.deepStrictEqual(thinkingPart, {
       reasoning: 'pondering',
-      custom: { anthropicThinking: { signature: 'sig_456' } },
+      metadata: { thoughtSignature: 'sig_456' },
     });
 
     const redactedPart = (runner as any).fromBetaContentBlock({
@@ -766,7 +765,7 @@ describe('BetaRunner', () => {
     });
     assert.deepStrictEqual(serverToolPart, {
       text: '[Anthropic server tool srv/serverTool] input: {"arg":"value"}',
-      custom: {
+      metadata: {
         anthropicServerToolUse: {
           id: 'srv_tool_1',
           name: 'srv/serverTool',
@@ -800,5 +799,320 @@ describe('BetaRunner', () => {
 
     const nullReason = exposed.fromBetaStopReason(null);
     assert.strictEqual(nullReason, 'unknown');
+  });
+
+  it('should convert citations_delta to citation part', () => {
+    const mockClient = createMockAnthropicClient();
+    const runner = new BetaRunner({
+      name: 'claude-test',
+      client: mockClient as Anthropic,
+    });
+
+    const citationPart = (runner as any).toGenkitPart({
+      type: 'content_block_delta',
+      index: 0,
+      delta: {
+        type: 'citations_delta',
+        citation: {
+          type: 'char_location',
+          cited_text: 'The sky is blue.',
+          document_index: 0,
+          document_title: 'Facts',
+          start_char_index: 0,
+          end_char_index: 16,
+        },
+      },
+    });
+
+    assert.deepStrictEqual(citationPart, {
+      text: '',
+      metadata: {
+        citations: [
+          {
+            type: 'char_location',
+            citedText: 'The sky is blue.',
+            documentIndex: 0,
+            documentTitle: 'Facts',
+            fileId: undefined,
+            startCharIndex: 0,
+            endCharIndex: 16,
+          },
+        ],
+      },
+    });
+  });
+
+  it('should convert text block with citations', () => {
+    const mockClient = createMockAnthropicClient();
+    const runner = new BetaRunner({
+      name: 'claude-test',
+      client: mockClient as Anthropic,
+    });
+
+    const textPart = (runner as any).fromBetaContentBlock({
+      type: 'text',
+      text: 'The answer is green.',
+      citations: [
+        {
+          type: 'char_location',
+          cited_text: 'grass is green',
+          document_index: 0,
+          document_title: 'Nature',
+          start_char_index: 5,
+          end_char_index: 19,
+        },
+      ],
+    });
+
+    assert.deepStrictEqual(textPart, {
+      text: 'The answer is green.',
+      metadata: {
+        citations: [
+          {
+            type: 'char_location',
+            citedText: 'grass is green',
+            documentIndex: 0,
+            documentTitle: 'Nature',
+            fileId: undefined,
+            startCharIndex: 5,
+            endCharIndex: 19,
+          },
+        ],
+      },
+    });
+  });
+
+  it('should convert page_location citations from PDF documents', () => {
+    const mockClient = createMockAnthropicClient();
+    const runner = new BetaRunner({
+      name: 'claude-test',
+      client: mockClient as Anthropic,
+    });
+
+    const textPart = (runner as any).fromBetaContentBlock({
+      type: 'text',
+      text: 'According to the document...',
+      citations: [
+        {
+          type: 'page_location',
+          cited_text: 'Important finding',
+          document_index: 0,
+          document_title: 'Report.pdf',
+          start_page_number: 1,
+          end_page_number: 2,
+        },
+      ],
+    });
+
+    assert.deepStrictEqual(textPart, {
+      text: 'According to the document...',
+      metadata: {
+        citations: [
+          {
+            type: 'page_location',
+            citedText: 'Important finding',
+            documentIndex: 0,
+            documentTitle: 'Report.pdf',
+            fileId: undefined,
+            startPageNumber: 1,
+            endPageNumber: 2,
+          },
+        ],
+      },
+    });
+  });
+
+  it('should convert content_block_location citations', () => {
+    const mockClient = createMockAnthropicClient();
+    const runner = new BetaRunner({
+      name: 'claude-test',
+      client: mockClient as Anthropic,
+    });
+
+    const textPart = (runner as any).fromBetaContentBlock({
+      type: 'text',
+      text: 'Based on the content...',
+      citations: [
+        {
+          type: 'content_block_location',
+          cited_text: 'Block content',
+          document_index: 1,
+          document_title: 'Structured Doc',
+          start_block_index: 0,
+          end_block_index: 2,
+        },
+      ],
+    });
+
+    assert.deepStrictEqual(textPart, {
+      text: 'Based on the content...',
+      metadata: {
+        citations: [
+          {
+            type: 'content_block_location',
+            citedText: 'Block content',
+            documentIndex: 1,
+            documentTitle: 'Structured Doc',
+            fileId: undefined,
+            startBlockIndex: 0,
+            endBlockIndex: 2,
+          },
+        ],
+      },
+    });
+  });
+
+  it('should skip web search citations (no document_index)', () => {
+    const mockClient = createMockAnthropicClient();
+    const runner = new BetaRunner({
+      name: 'claude-test',
+      client: mockClient as Anthropic,
+    });
+
+    const textPart = (runner as any).fromBetaContentBlock({
+      type: 'text',
+      text: 'Search results say...',
+      citations: [
+        {
+          type: 'web_search_result_location',
+          cited_text: 'From the web',
+          url: 'https://example.com',
+          title: 'Example Page',
+          // Note: no document_index - this is a web search citation
+        },
+      ],
+    });
+
+    // Should return text without citations metadata since web search citations are filtered
+    assert.deepStrictEqual(textPart, {
+      text: 'Search results say...',
+    });
+  });
+
+  it('should convert anthropicDocument custom part to beta document block', () => {
+    const mockClient = createMockAnthropicClient();
+    const runner = new BetaRunner({
+      name: 'claude-test',
+      client: mockClient as Anthropic,
+    });
+
+    const docBlock = (runner as any).toAnthropicMessageContent({
+      custom: {
+        anthropicDocument: {
+          source: {
+            type: 'text',
+            data: 'Document content here.',
+          },
+          title: 'My Document',
+          citations: { enabled: true },
+        },
+      },
+    });
+
+    assert.strictEqual(docBlock.type, 'document');
+    assert.strictEqual(docBlock.title, 'My Document');
+    assert.deepStrictEqual(docBlock.citations, { enabled: true });
+    assert.strictEqual(docBlock.source.type, 'text');
+    assert.strictEqual(docBlock.source.data, 'Document content here.');
+  });
+
+  it('should convert file source in beta document block', () => {
+    const mockClient = createMockAnthropicClient();
+    const runner = new BetaRunner({
+      name: 'claude-test',
+      client: mockClient as Anthropic,
+    });
+
+    const docBlock = (runner as any).toAnthropicMessageContent({
+      custom: {
+        anthropicDocument: {
+          source: {
+            type: 'file',
+            fileId: 'file-abc123',
+          },
+          title: 'Uploaded File',
+        },
+      },
+    });
+
+    assert.strictEqual(docBlock.type, 'document');
+    assert.strictEqual(docBlock.source.type, 'file');
+    assert.strictEqual(docBlock.source.file_id, 'file-abc123');
+  });
+
+  it('should convert URL source in beta document block', () => {
+    const mockClient = createMockAnthropicClient();
+    const runner = new BetaRunner({
+      name: 'claude-test',
+      client: mockClient as Anthropic,
+    });
+
+    const docBlock = (runner as any).toAnthropicMessageContent({
+      custom: {
+        anthropicDocument: {
+          source: {
+            type: 'url',
+            url: 'https://example.com/doc.pdf',
+          },
+        },
+      },
+    });
+
+    assert.strictEqual(docBlock.type, 'document');
+    assert.strictEqual(docBlock.source.type, 'url');
+    assert.strictEqual(docBlock.source.url, 'https://example.com/doc.pdf');
+  });
+
+  it('should convert base64 source in beta document block', () => {
+    const mockClient = createMockAnthropicClient();
+    const runner = new BetaRunner({
+      name: 'claude-test',
+      client: mockClient as Anthropic,
+    });
+
+    const docBlock = (runner as any).toAnthropicMessageContent({
+      custom: {
+        anthropicDocument: {
+          source: {
+            type: 'base64',
+            data: 'JVBERi0xLjQ=',
+            mediaType: 'application/pdf',
+          },
+        },
+      },
+    });
+
+    assert.strictEqual(docBlock.type, 'document');
+    assert.strictEqual(docBlock.source.type, 'base64');
+    assert.strictEqual(docBlock.source.data, 'JVBERi0xLjQ=');
+    assert.strictEqual(docBlock.source.media_type, 'application/pdf');
+  });
+
+  it('should convert content source in beta document block', () => {
+    const mockClient = createMockAnthropicClient();
+    const runner = new BetaRunner({
+      name: 'claude-test',
+      client: mockClient as Anthropic,
+    });
+
+    const docBlock = (runner as any).toAnthropicMessageContent({
+      custom: {
+        anthropicDocument: {
+          source: {
+            type: 'content',
+            content: [
+              { type: 'text', text: 'First block' },
+              { type: 'text', text: 'Second block' },
+            ],
+          },
+          citations: { enabled: true },
+        },
+      },
+    });
+
+    assert.strictEqual(docBlock.type, 'document');
+    assert.strictEqual(docBlock.source.type, 'content');
+    assert.strictEqual(docBlock.source.content.length, 2);
+    assert.strictEqual(docBlock.source.content[0].text, 'First block');
   });
 });

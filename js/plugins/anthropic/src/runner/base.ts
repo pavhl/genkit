@@ -50,8 +50,6 @@ import {
   RunnerTypes,
 } from './types.js';
 
-const ANTHROPIC_THINKING_CUSTOM_KEY = 'anthropicThinking';
-
 /**
  * Shared runner logic for Anthropic SDK integrations.
  *
@@ -62,7 +60,6 @@ const ANTHROPIC_THINKING_CUSTOM_KEY = 'anthropicThinking';
 export abstract class BaseRunner<ApiTypes extends RunnerTypes> {
   protected name: string;
   protected client: Anthropic;
-  protected cacheSystemPrompt?: boolean;
 
   /**
    * Default maximum output tokens for Claude models when not specified in the request.
@@ -72,7 +69,6 @@ export abstract class BaseRunner<ApiTypes extends RunnerTypes> {
   constructor(params: ClaudeRunnerParams) {
     this.name = params.name;
     this.client = params.client;
-    this.cacheSystemPrompt = params.cacheSystemPrompt;
   }
 
   /**
@@ -298,35 +294,11 @@ export abstract class BaseRunner<ApiTypes extends RunnerTypes> {
     };
   }
 
-  protected createThinkingPart(thinking: string, signature?: string): Part {
-    const custom =
-      signature !== undefined
-        ? {
-            [ANTHROPIC_THINKING_CUSTOM_KEY]: { signature },
-          }
-        : undefined;
-    return custom
-      ? {
-          reasoning: thinking,
-          custom,
-        }
-      : {
-          reasoning: thinking,
-        };
-  }
-
   protected getThinkingSignature(part: Part): string | undefined {
-    const custom = part.custom as Record<string, unknown> | undefined;
-    const thinkingValue = custom?.[ANTHROPIC_THINKING_CUSTOM_KEY];
-    if (
-      typeof thinkingValue === 'object' &&
-      thinkingValue !== null &&
-      'signature' in thinkingValue &&
-      typeof (thinkingValue as { signature: unknown }).signature === 'string'
-    ) {
-      return (thinkingValue as { signature: string }).signature;
-    }
-    return undefined;
+    const metadata = part.metadata as Record<string, unknown> | undefined;
+    return typeof metadata?.thoughtSignature === 'string'
+      ? metadata.thoughtSignature
+      : undefined;
   }
 
   protected getRedactedThinkingData(part: Part): string | undefined {
@@ -340,14 +312,22 @@ export abstract class BaseRunner<ApiTypes extends RunnerTypes> {
   ):
     | { type: 'enabled'; budget_tokens: number }
     | { type: 'disabled' }
+    | { type: 'adaptive'; display?: 'summarized' | 'omitted' }
     | undefined {
     if (!config) return undefined;
 
-    const { enabled, budgetTokens } = config;
+    const { enabled, budgetTokens, adaptive, display } = config;
+
+    if (adaptive === true) {
+      return {
+        type: 'adaptive',
+        ...(display !== undefined && { display }),
+      };
+    }
 
     if (enabled === true) {
       if (budgetTokens === undefined) {
-        return undefined;
+        throw new Error('budgetTokens is required when thinking is enabled');
       }
       return { type: 'enabled', budget_tokens: budgetTokens };
     }
@@ -361,24 +341,6 @@ export abstract class BaseRunner<ApiTypes extends RunnerTypes> {
     }
 
     return undefined;
-  }
-
-  protected toWebSearchToolResultPart(params: {
-    toolUseId: string;
-    content: unknown;
-    type: string;
-  }): Part {
-    const { toolUseId, content, type } = params;
-    return {
-      text: `[Anthropic server tool result ${toolUseId}] ${JSON.stringify(content)}`,
-      custom: {
-        anthropicServerToolResult: {
-          type,
-          toolUseId,
-          content,
-        },
-      },
-    };
   }
 
   /**
@@ -395,39 +357,31 @@ export abstract class BaseRunner<ApiTypes extends RunnerTypes> {
    * toAnthropicMessageContent implementation.
    */
   protected toAnthropicMessages(messages: MessageData[]): {
-    system?: string;
+    system?: RunnerContentBlockParam<ApiTypes>[];
     messages: RunnerMessageParam<ApiTypes>[];
   } {
-    let system: string | undefined;
+    let system: RunnerContentBlockParam<ApiTypes>[] | undefined;
 
     if (messages[0]?.role === 'system') {
       const systemMessage = messages[0];
-      const textParts: string[] = [];
+      messages = messages.slice(1);
 
       for (const part of systemMessage.content ?? []) {
-        if (part.text) {
-          textParts.push(part.text);
-        } else if (part.media || part.toolRequest || part.toolResponse) {
+        if (part.media || part.toolRequest || part.toolResponse) {
           throw new Error(
             'System messages can only contain text content. Media, tool requests, and tool responses are not supported in system messages.'
           );
         }
       }
 
-      // Concatenate multiple text parts into a single string.
-      // Note: The Anthropic SDK supports system as string | Array<TextBlockParam>,
-      // so we could alternatively preserve the multi-part structure as:
-      //   system = textParts.map(text => ({ type: 'text', text }))
-      // However, concatenation is simpler and maintains semantic equivalence while
-      // keeping the cache control logic straightforward in the concrete runners.
-      system = textParts.length > 0 ? textParts.join('\n\n') : undefined;
+      system = systemMessage.content.map((part) =>
+        this.toAnthropicMessageContent(part)
+      );
     }
 
-    const messagesToIterate =
-      system !== undefined ? messages.slice(1) : messages;
     const anthropicMsgs: RunnerMessageParam<ApiTypes>[] = [];
 
-    for (const message of messagesToIterate) {
+    for (const message of messages) {
       const msg = new GenkitMessage(message);
 
       // Detect tool message kind from Genkit Parts (no SDK typing needed)
@@ -454,12 +408,20 @@ export abstract class BaseRunner<ApiTypes extends RunnerTypes> {
 
   /**
    * Converts a Genkit ToolDefinition to an Anthropic Tool object.
+   *
+   * Anthropic requires `input_schema.type` to be present (usually `"object"`).
+   * Genkit's `ToolDefinition` may have an empty schema (e.g. from `z.void()`)
+   * which lacks the `type` field. We default to `{ type: "object" }` to
+   * prevent 400 errors from the Anthropic API.
    */
   protected toAnthropicTool(tool: ToolDefinition): RunnerTool<ApiTypes> {
+    const schema = tool.inputSchema || {};
+    const inputSchema =
+      'type' in schema ? schema : { ...schema, type: 'object' as const };
     return {
       name: tool.name,
       description: tool.description,
-      input_schema: tool.inputSchema,
+      input_schema: inputSchema,
     } as RunnerTool<ApiTypes>;
   }
 
@@ -467,28 +429,24 @@ export abstract class BaseRunner<ApiTypes extends RunnerTypes> {
    * Converts an Anthropic request to a non-streaming Anthropic API request body.
    * @param modelName The name of the Anthropic model to use.
    * @param request The Genkit GenerateRequest to convert.
-   * @param cacheSystemPrompt Whether to cache the system prompt.
    * @returns The converted Anthropic API non-streaming request body.
    * @throws An error if an unsupported output format is requested.
    */
   protected abstract toAnthropicRequestBody(
     modelName: string,
-    request: GenerateRequest<typeof AnthropicConfigSchema>,
-    cacheSystemPrompt?: boolean
+    request: GenerateRequest<typeof AnthropicConfigSchema>
   ): RunnerRequestBody<ApiTypes>;
 
   /**
    * Converts an Anthropic request to a streaming Anthropic API request body.
    * @param modelName The name of the Anthropic model to use.
    * @param request The Genkit GenerateRequest to convert.
-   * @param cacheSystemPrompt Whether to cache the system prompt.
    * @returns The converted Anthropic API streaming request body.
    * @throws An error if an unsupported output format is requested.
    */
   protected abstract toAnthropicStreamingRequestBody(
     modelName: string,
-    request: GenerateRequest<typeof AnthropicConfigSchema>,
-    cacheSystemPrompt?: boolean
+    request: GenerateRequest<typeof AnthropicConfigSchema>
   ): RunnerStreamingRequestBody<ApiTypes>;
 
   protected abstract createMessage(
@@ -520,11 +478,7 @@ export abstract class BaseRunner<ApiTypes extends RunnerTypes> {
     const { streamingRequested, sendChunk, abortSignal } = options;
 
     if (streamingRequested) {
-      const body = this.toAnthropicStreamingRequestBody(
-        this.name,
-        request,
-        this.cacheSystemPrompt
-      );
+      const body = this.toAnthropicStreamingRequestBody(this.name, request);
       const stream = this.streamMessages(body, abortSignal);
       for await (const event of stream) {
         const part = this.toGenkitPart(event);
@@ -539,11 +493,7 @@ export abstract class BaseRunner<ApiTypes extends RunnerTypes> {
       return this.toGenkitResponse(finalMessage);
     }
 
-    const body = this.toAnthropicRequestBody(
-      this.name,
-      request,
-      this.cacheSystemPrompt
-    );
+    const body = this.toAnthropicRequestBody(this.name, request);
     const response = await this.createMessage(body, abortSignal);
     return this.toGenkitResponse(response);
   }

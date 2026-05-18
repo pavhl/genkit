@@ -12,6 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// This sample demonstrates prompts using both inline code definitions and
+// .prompt files (Dotprompt). It shows simple prompts, structured output with
+// typed schemas, and complex prompts with Handlebars conditionals.
+//
+// To run:
+//
+//	go run .
+//
+// In another terminal, test a simple joke flow:
+//
+//	curl -N -X POST http://localhost:8080/simpleJokePromptFlow \
+//	  -H "Content-Type: application/json" \
+//	  -d '{"data": "bananas"}'
+//
+// Test a structured joke flow (returns JSON):
+//
+//	curl -N -X POST http://localhost:8080/structuredJokePromptFlow \
+//	  -H "Content-Type: application/json" \
+//	  -d '{"data": {"topic": "bananas"}}'
+//
+// Test a recipe flow:
+//
+//	curl -N -X POST http://localhost:8080/recipePromptFlow \
+//	  -H "Content-Type: application/json" \
+//	  -d '{"data": {"dish": "tacos", "cuisine": "Mexican", "servingSize": 4}}'
+//
+// Test an assistant flow (with all middleware: retry, fallback, filesystem, skills):
+//
+//	curl -N -X POST http://localhost:8080/assistantPromptFlow \
+//	  -H "Content-Type: application/json" \
+//	  -d '{"data": "what files are in my current directory?"}'
 package main
 
 import (
@@ -24,6 +55,7 @@ import (
 	"github.com/firebase/genkit/go/core"
 	"github.com/firebase/genkit/go/genkit"
 	"github.com/firebase/genkit/go/plugins/googlegenai"
+	"github.com/firebase/genkit/go/plugins/middleware"
 	"github.com/firebase/genkit/go/plugins/server"
 	"google.golang.org/genai"
 )
@@ -62,6 +94,10 @@ type Recipe struct {
 	Difficulty   string        `json:"difficulty" jsonschema:"enum=easy,enum=medium,enum=hard"`
 }
 
+type AssistantRequest struct {
+	Query string `json:"query" jsonschema:"description=The user's query or request"`
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -69,7 +105,7 @@ func main() {
 	// Config parameter, the Google AI plugin will get the API key from the
 	// GEMINI_API_KEY or GOOGLE_API_KEY environment variable, which is the recommended
 	// practice.
-	g := genkit.Init(ctx, genkit.WithPlugins(&googlegenai.GoogleAI{}))
+	g := genkit.Init(ctx, genkit.WithPlugins(&googlegenai.GoogleAI{}, &middleware.Middleware{}))
 
 	// Define schemas for the expected input and output types so that the Dotprompt files can reference them.
 	// Alternatively, you can specify the JSON schema by hand in the Dotprompt metadata.
@@ -78,6 +114,7 @@ func main() {
 	genkit.DefineSchemaFor[Joke](g)
 	genkit.DefineSchemaFor[RecipeRequest](g)
 	genkit.DefineSchemaFor[Recipe](g)
+	genkit.DefineSchemaFor[AssistantRequest](g)
 
 	// TODO: Include partials and helpers.
 
@@ -88,6 +125,8 @@ func main() {
 	DefineStructuredJokeWithDotprompt(g)
 	DefineRecipeWithInlinePrompt(g)
 	DefineRecipeWithDotprompt(g)
+	DefineAssistantWithInlinePrompt(g)
+	DefineAssistantWithDotprompt(g)
 
 	// Optionally, start a web server to make the flows callable via HTTP.
 	mux := http.NewServeMux()
@@ -103,7 +142,7 @@ func main() {
 func DefineSimpleJokeWithInlinePrompt(g *genkit.Genkit) {
 	jokePrompt := genkit.DefinePrompt(
 		g, "joke.code",
-		ai.WithModel(googlegenai.ModelRef("gemini-2.5-flash", &genai.GenerateContentConfig{
+		ai.WithModel(googlegenai.ModelRef("googleai/gemini-2.5-flash", &genai.GenerateContentConfig{
 			ThinkingConfig: &genai.ThinkingConfig{
 				ThinkingBudget: genai.Ptr[int32](0),
 			},
@@ -162,7 +201,7 @@ func DefineSimpleJokeWithDotprompt(g *genkit.Genkit) {
 func DefineStructuredJokeWithInlinePrompt(g *genkit.Genkit) {
 	jokePrompt := genkit.DefineDataPrompt[JokeRequest, *Joke](
 		g, "structured-joke.code",
-		ai.WithModel(googlegenai.ModelRef("gemini-2.5-flash", &genai.GenerateContentConfig{
+		ai.WithModel(googlegenai.ModelRef("googleai/gemini-2.5-flash", &genai.GenerateContentConfig{
 			ThinkingConfig: &genai.ThinkingConfig{
 				ThinkingBudget: genai.Ptr[int32](0),
 			},
@@ -215,7 +254,7 @@ func DefineStructuredJokeWithDotprompt(g *genkit.Genkit) {
 func DefineRecipeWithInlinePrompt(g *genkit.Genkit) {
 	recipePrompt := genkit.DefineDataPrompt[RecipeRequest, *Recipe](
 		g, "recipe.code",
-		ai.WithModel(googlegenai.ModelRef("gemini-2.5-flash", &genai.GenerateContentConfig{
+		ai.WithModel(googlegenai.ModelRef("googleai/gemini-2.5-flash", &genai.GenerateContentConfig{
 			ThinkingConfig: &genai.ThinkingConfig{
 				ThinkingBudget: genai.Ptr[int32](0),
 			},
@@ -284,4 +323,68 @@ func newIngredientFilter() func([]*Ingredient) []*Ingredient {
 		}
 		return
 	}
+}
+
+// DefineAssistantWithInlinePrompt demonstrates attaching multiple middlewares
+// (Retry, Fallback, Filesystem, and Skills) directly to a prompt definition.
+// This creates a highly capable and resilient prompt that is also fully
+// transparent in the Dev UI metadata.
+func DefineAssistantWithInlinePrompt(g *genkit.Genkit) {
+	assistantPrompt := genkit.DefinePrompt(
+		g, "assistant.code",
+		ai.WithModelName("googleai/gemini-flash-latest"),
+		ai.WithPrompt("{{query}}"),
+		ai.WithInputType(AssistantRequest{}),
+		ai.WithUse(
+			&middleware.Retry{MaxRetries: 2},
+			&middleware.Fallback{
+				Models: []ai.ModelRef{
+					googlegenai.ModelRef("googleai/gemini-3.1-flash-preview", nil),
+					googlegenai.ModelRef("googleai/gemini-3.1-pro-preview", &genai.GenerateContentConfig{
+						Temperature: genai.Ptr[float32](2.0),
+					}),
+				},
+			},
+			&middleware.Filesystem{RootDir: "."},
+			&middleware.Skills{SkillPaths: []string{"./skills"}},
+		),
+	)
+
+	genkit.DefineStreamingFlow(g, "assistantPromptFlow",
+		func(ctx context.Context, query string, sendChunk core.StreamCallback[string]) (string, error) {
+			stream := assistantPrompt.ExecuteStream(ctx, ai.WithInput(&AssistantRequest{Query: query}))
+			for result, err := range stream {
+				if err != nil {
+					return "", fmt.Errorf("assistant error: %w", err)
+				}
+				if result.Done {
+					return result.Response.Text(), nil
+				}
+				sendChunk(ctx, result.Chunk.Text())
+			}
+			return "", nil
+		},
+	)
+}
+
+// DefineAssistantWithDotprompt demonstrates loading a prompt from a .prompt file
+// that includes a full suite of middleware configuration in its YAML frontmatter.
+func DefineAssistantWithDotprompt(g *genkit.Genkit) {
+	genkit.DefineStreamingFlow(g, "assistantDotpromptFlow",
+		func(ctx context.Context, query string, sendChunk core.StreamCallback[string]) (string, error) {
+			// The "assistant" prompt file includes all middleware in its frontmatter.
+			assistantPrompt := genkit.LookupPrompt(g, "assistant")
+			stream := assistantPrompt.ExecuteStream(ctx, ai.WithInput(&AssistantRequest{Query: query}))
+			for result, err := range stream {
+				if err != nil {
+					return "", fmt.Errorf("agent error: %w", err)
+				}
+				if result.Done {
+					return result.Response.Text(), nil
+				}
+				sendChunk(ctx, result.Chunk.Text())
+			}
+			return "", nil
+		},
+	)
 }

@@ -23,6 +23,10 @@ import {
   processStream,
 } from '../common/utils.js';
 import {
+  CreateInteractionRequest,
+  GeminiInteraction,
+} from './interaction-types.js';
+import {
   ClientOptions,
   EmbedContentRequest,
   EmbedContentResponse,
@@ -56,6 +60,27 @@ export async function listModels(
   const response = await makeRequest(url, fetchOptions);
   const modelResponse = (await response.json()) as ListModelsResponse;
   return modelResponse.publisherModels;
+}
+
+export async function createInteraction(
+  createInteractionRequest: CreateInteractionRequest,
+  clientOptions: ClientOptions
+): Promise<GeminiInteraction> {
+  const url = getVertexAIUrl({
+    includeProjectAndLocation: true,
+    resourcePath: `interactions`,
+    clientOptions,
+  });
+
+  const fetchOptions = await getFetchOptions({
+    method: 'POST',
+    clientOptions,
+    body: JSON.stringify(createInteractionRequest),
+  });
+
+  const response = await makeRequest(url, fetchOptions);
+
+  return await response.json();
 }
 
 export async function generateContent(
@@ -312,12 +337,14 @@ function getAbortSignal(clientOptions: ClientOptions): AbortSignal | undefined {
 }
 
 async function getHeaders(clientOptions: ClientOptions): Promise<HeadersInit> {
+  const customHeaders = clientOptions.customHeaders || {};
   if (clientOptions.kind == 'express') {
     const headers: HeadersInit = {
       'x-goog-api-key': calculateApiKey(clientOptions.apiKey, undefined),
       'Content-Type': 'application/json',
       'X-Goog-Api-Client': getGenkitClientHeader(),
       'User-Agent': getGenkitClientHeader(),
+      ...customHeaders,
     };
     return headers;
   } else {
@@ -328,6 +355,7 @@ async function getHeaders(clientOptions: ClientOptions): Promise<HeadersInit> {
       'Content-Type': 'application/json',
       'X-Goog-Api-Client': getGenkitClientHeader(),
       'User-Agent': getGenkitClientHeader(),
+      ...customHeaders,
     };
     if (clientOptions.apiKey) {
       headers['x-goog-api-key'] = clientOptions.apiKey;
@@ -363,10 +391,29 @@ async function makeRequest(
     if (!response.ok) {
       let errorText = await response.text();
       let errorMessage = errorText;
+      let errorDetail: unknown;
       try {
         const json = JSON.parse(errorText);
+        errorDetail = json;
         if (json.error && json.error.message) {
           errorMessage = json.error.message;
+          if (Array.isArray(json.error.details)) {
+            const detailsText = json.error.details
+              .map((d: any) => {
+                if (d.detail && typeof d.detail === 'string') {
+                  const match = d.detail.match(
+                    /\[ORIGINAL ERROR\]\s*(?:generic::[^:]+:\s*)?(.*?)(?:\s+\[|\s+\d+\s+\{|$)/
+                  );
+                  return match ? match[1].trim() : d.detail;
+                }
+                return JSON.stringify(d);
+              })
+              .filter(Boolean)
+              .join('\n');
+            if (detailsText) {
+              errorMessage += `\nDetails: ${detailsText}`;
+            }
+          }
         }
       } catch (e) {
         // Not JSON or expected format, use the raw text
@@ -389,6 +436,7 @@ async function makeRequest(
       throw new GenkitError({
         status,
         message: `Error fetching from ${url}: [${response.status} ${response.statusText}] ${errorMessage}`,
+        detail: errorDetail,
       });
     }
     return response;

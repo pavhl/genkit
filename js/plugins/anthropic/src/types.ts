@@ -16,8 +16,11 @@
  */
 
 import type Anthropic from '@anthropic-ai/sdk';
+import type { CacheControlEphemeral } from '@anthropic-ai/sdk/resources/messages';
 import { z } from 'genkit';
 import { GenerationCommonConfigSchema } from 'genkit/model';
+
+export type { CacheControlEphemeral as AnthropicCacheControl };
 
 /**
  * Internal symbol for dependency injection in tests.
@@ -31,7 +34,6 @@ export const __testClient = Symbol('testClient');
  */
 export interface PluginOptions {
   apiKey?: string;
-  cacheSystemPrompt?: boolean;
   /** Default API surface for all requests unless overridden per-request. */
   apiVersion?: 'stable' | 'beta';
 }
@@ -50,7 +52,6 @@ export interface InternalPluginOptions extends PluginOptions {
 interface ClaudeHelperParamsBase {
   name: string;
   client: Anthropic;
-  cacheSystemPrompt?: boolean;
   defaultApiVersion?: 'stable' | 'beta';
 }
 
@@ -64,7 +65,42 @@ export interface ClaudeModelParams extends ClaudeHelperParamsBase {}
  */
 export interface ClaudeRunnerParams extends ClaudeHelperParamsBase {}
 
-export const AnthropicBaseConfigSchema = GenerationCommonConfigSchema.extend({
+export const ThinkingConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    budgetTokens: z.number().min(1_024).optional(),
+    adaptive: z.boolean().optional(),
+    display: z.enum(['summarized', 'omitted']).optional(),
+  })
+  .passthrough()
+  .superRefine((value, ctx) => {
+    if (value.enabled && value.adaptive) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['adaptive'],
+        message:
+          'Cannot use both enabled and adaptive thinking modes simultaneously',
+      });
+    }
+
+    if (value.enabled) {
+      if (value.budgetTokens === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['budgetTokens'],
+          message: 'budgetTokens is required when thinking is enabled',
+        });
+      } else if (!Number.isInteger(value.budgetTokens)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['budgetTokens'],
+          message: 'budgetTokens must be an integer',
+        });
+      }
+    }
+  });
+
+export const AnthropicConfigSchema = GenerationCommonConfigSchema.extend({
   tool_choice: z
     .union([
       z
@@ -102,52 +138,37 @@ export const AnthropicBaseConfigSchema = GenerationCommonConfigSchema.extend({
     .describe(
       'The API version to use for the request. Both stable and beta features are available on the beta API surface.'
     ),
-}).passthrough();
-
-export type AnthropicBaseConfigSchemaType = typeof AnthropicBaseConfigSchema;
-
-export const ThinkingConfigSchema = z
-  .object({
-    enabled: z.boolean().optional(),
-    budgetTokens: z.number().min(1_024).optional(),
-  })
-  .passthrough()
-  .passthrough()
-  .superRefine((value, ctx) => {
-    if (!value.enabled) return;
-
-    if (value.budgetTokens === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['budgetTokens'],
-        message: 'budgetTokens is required when thinking is enabled',
-      });
-    } else if (
-      value.budgetTokens !== undefined &&
-      !Number.isInteger(value.budgetTokens)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['budgetTokens'],
-        message: 'budgetTokens must be an integer',
-      });
-    }
-  });
-
-export const AnthropicThinkingConfigSchema = AnthropicBaseConfigSchema.extend({
   thinking: ThinkingConfigSchema.optional().describe(
     'The thinking configuration to use for the request. Thinking is a feature that allows the model to think about the request and provide a better response.'
   ),
+  output_config: z
+    .object({
+      effort: z.enum(['low', 'medium', 'high', 'xhigh']).optional(),
+      task_budget: z
+        .object({
+          type: z.literal('tokens').default('tokens'),
+          total: z.number().min(20000),
+        })
+        .optional(),
+    })
+    .passthrough()
+    .describe(
+      'Configuration for output generation, such as setting the effort parameter and task budgets.'
+    )
+    .optional(),
 }).passthrough();
 
-export const AnthropicConfigSchema = AnthropicThinkingConfigSchema;
-
 export type ThinkingConfig = z.infer<typeof ThinkingConfigSchema>;
-export type AnthropicBaseConfig = z.infer<typeof AnthropicBaseConfigSchema>;
-export type AnthropicThinkingConfig = z.infer<
-  typeof AnthropicThinkingConfigSchema
->;
-export type ClaudeConfig = AnthropicThinkingConfig | AnthropicBaseConfig;
+export type ClaudeConfig = z.infer<typeof AnthropicConfigSchema>;
+export type AnthropicConfigSchemaType = typeof AnthropicConfigSchema;
+
+// Backwards compatibility aliases for previous schema naming convention
+export const AnthropicBaseConfigSchema = AnthropicConfigSchema;
+export const AnthropicThinkingConfigSchema = AnthropicConfigSchema;
+export type AnthropicBaseConfigSchemaType = typeof AnthropicConfigSchema;
+export type AnthropicThinkingConfigSchemaType = typeof AnthropicConfigSchema;
+export type AnthropicBaseConfig = ClaudeConfig;
+export type AnthropicThinkingConfig = ClaudeConfig;
 
 /**
  * Media object representation with URL and optional content type.
@@ -186,7 +207,7 @@ export const MEDIA_TYPES = {
  *   3. otherwise stable
  */
 export function resolveBetaEnabled(
-  cfg: AnthropicThinkingConfig | AnthropicBaseConfig | undefined,
+  cfg: ClaudeConfig | undefined,
   pluginDefaultApiVersion?: 'stable' | 'beta'
 ): boolean {
   if (cfg?.apiVersion !== undefined) {
@@ -195,3 +216,96 @@ export function resolveBetaEnabled(
   if (pluginDefaultApiVersion === 'beta') return true;
   return false;
 }
+
+/** Plain text document source. */
+export interface AnthropicTextSource {
+  type: 'text';
+  data: string;
+  mediaType?: string;
+}
+
+/** Base64-encoded document source (e.g., PDF). */
+export interface AnthropicBase64Source {
+  type: 'base64';
+  data: string;
+  mediaType: string;
+}
+
+/** File reference source (from Files API). */
+export interface AnthropicFileSource {
+  type: 'file';
+  fileId: string;
+}
+
+/** Custom content blocks for granular citation control. */
+export interface AnthropicContentSource {
+  type: 'content';
+  content: Array<
+    | { type: 'text'; text: string }
+    | {
+        type: 'image';
+        source: { type: 'base64'; mediaType: string; data: string };
+      }
+  >;
+}
+
+/** URL source for PDFs. */
+export interface AnthropicURLSource {
+  type: 'url';
+  url: string;
+}
+
+/** Union of all document source types. */
+export type AnthropicDocumentSource =
+  | AnthropicTextSource
+  | AnthropicBase64Source
+  | AnthropicFileSource
+  | AnthropicContentSource
+  | AnthropicURLSource;
+
+/** Options for creating an Anthropic document with optional citations. */
+export interface AnthropicDocumentOptions {
+  source: AnthropicDocumentSource;
+  title?: string;
+  context?: string;
+  citations?: { enabled: boolean };
+}
+
+/** Citation from a plain text document (character indices). */
+export interface CharLocationCitation {
+  type: 'char_location';
+  citedText: string;
+  documentIndex: number;
+  documentTitle?: string;
+  fileId?: string;
+  startCharIndex: number;
+  endCharIndex: number;
+}
+
+/** Citation from a PDF document (page numbers). */
+export interface PageLocationCitation {
+  type: 'page_location';
+  citedText: string;
+  documentIndex: number;
+  documentTitle?: string;
+  fileId?: string;
+  startPageNumber: number;
+  endPageNumber: number;
+}
+
+/** Citation from a custom content document (block indices). */
+export interface ContentBlockLocationCitation {
+  type: 'content_block_location';
+  citedText: string;
+  documentIndex: number;
+  documentTitle?: string;
+  fileId?: string;
+  startBlockIndex: number;
+  endBlockIndex: number;
+}
+
+/** Union of all citation types for documents. */
+export type AnthropicCitation =
+  | CharLocationCitation
+  | PageLocationCitation
+  | ContentBlockLocationCitation;

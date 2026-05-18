@@ -29,6 +29,7 @@ import {
   type ModelReference,
 } from 'genkit/model';
 import { backgroundModel as pluginBackgroundModel } from 'genkit/plugin';
+import { isKnownKey } from '../common/utils.js';
 import { veoCheckOperation, veoPredict } from './client.js';
 import {
   ClientOptions,
@@ -69,9 +70,18 @@ export const VeoConfigSchema = z
     durationSeconds: z
       .number()
       .step(1)
-      .min(5)
+      .min(4) // Veo 3.1 supports 4s for some resolutions.
       .max(8)
-      .describe('Length of each output video in seconds, between 5 and 8.')
+      .describe('Length of each output video in seconds.')
+      .optional(),
+    resolution: z
+      .enum(['720p', '1080p', '4k'])
+      .describe('Resolution of the output video.')
+      .optional(),
+    seed: z
+      .number()
+      .int()
+      .describe('Random seed for the video generation.')
       .optional(),
     enhancePrompt: z
       .boolean()
@@ -111,6 +121,7 @@ function commonRef(
 const GENERIC_MODEL = commonRef('veo');
 
 const KNOWN_MODELS = {
+  'veo-3.1-lite-generate-preview': commonRef('veo-3.1-lite-generate-preview'),
   'veo-3.1-generate-preview': commonRef('veo-3.1-generate-preview'),
   'veo-3.1-fast-generate-preview': commonRef('veo-3.1-fast-generate-preview'),
   'veo-3.0-generate-001': commonRef('veo-3.0-generate-001'),
@@ -118,6 +129,7 @@ const KNOWN_MODELS = {
   'veo-2.0-generate-001': commonRef('veo-2.0-generate-001'),
 } as const;
 export type KnownModels = keyof typeof KNOWN_MODELS; // For autocomplete
+
 export type VeoModelName = `veo-${string}`;
 export function isVeoModelName(value?: string): value is VeoModelName {
   return !!value?.startsWith('veo-');
@@ -128,6 +140,11 @@ export function model(
   config: VeoConfig = {}
 ): ModelReference<ConfigSchemaType> {
   const name = checkModelName(version);
+
+  if (isKnownKey(name, KNOWN_MODELS)) {
+    return KNOWN_MODELS[name].withConfig(config);
+  }
+
   return modelRef({
     name: `googleai/${name}`,
     config,

@@ -21,6 +21,7 @@ import type { Server } from 'http';
 import path from 'path';
 import * as z from 'zod';
 import { StatusCodes, type Status } from './action.js';
+import { getGenkitRuntimeConfig } from './config.js';
 import { GENKIT_REFLECTION_API_SPEC_VERSION, GENKIT_VERSION } from './index.js';
 import { logger } from './logging.js';
 import type { Registry } from './registry.js';
@@ -91,6 +92,7 @@ export class ReflectionServer {
       startTime: Date;
     }
   >();
+  private v2Server: any | null = null;
 
   constructor(registry: Registry, options?: ReflectionServerOptions) {
     this.registry = registry;
@@ -128,6 +130,24 @@ export class ReflectionServer {
    * The server will be registered to be shut down on process exit.
    */
   async start() {
+    if (getGenkitRuntimeConfig().sandboxedRuntime) {
+      logger.debug(
+        'Skipping ReflectionServer start: not supported in sandboxed runtime.'
+      );
+      return;
+    }
+    if (process.env.GENKIT_REFLECTION_V2_SERVER) {
+      const { ReflectionServerV2 } = await import('./reflection-v2.js');
+      this.v2Server = new ReflectionServerV2(this.registry, {
+        configuredEnvs: this.options.configuredEnvs,
+        name: this.options.name,
+        url: process.env.GENKIT_REFLECTION_V2_SERVER,
+      });
+      await this.v2Server.start();
+      ReflectionServer.RUNNING_SERVERS.push(this);
+      return;
+    }
+
     const server = express();
 
     server.use(express.json({ limit: this.options.bodyLimit }));
@@ -149,6 +169,39 @@ export class ReflectionServer {
       logger.debug('Received quitquitquit');
       response.status(200).send('OK');
       await this.stop();
+    });
+
+    server.get('/api/values', async (req, response, next) => {
+      logger.debug('Fetching values.');
+      try {
+        const type = req.query.type;
+        if (!type) {
+          response.status(400).send('Query parameter "type" is required.');
+          return;
+        }
+        if (type !== 'defaultModel' && type !== 'middleware') {
+          response
+            .status(400)
+            .send(
+              `'type' ${type} is not supported. Only 'defaultModel' and 'middleware' are supported`
+            );
+          return;
+        }
+        const values = await this.registry.listValues(type as string);
+        const mappedValues: Record<string, any> = {};
+        for (const [key, value] of Object.entries(values)) {
+          mappedValues[key] =
+            value &&
+            (value as any).toJson &&
+            typeof (value as any).toJson === 'function'
+              ? (value as any).toJson()
+              : value;
+        }
+        response.send(mappedValues);
+      } catch (err) {
+        const { message, stack } = err as Error;
+        next({ message, stack });
+      }
     });
 
     server.get('/api/actions', async (_, response, next) => {
@@ -231,7 +284,7 @@ export class ReflectionServer {
               response.write(JSON.stringify(chunk) + '\n');
             };
             const result = await action.run(input, {
-              context,
+              context: context || {},
               onChunk: callback,
               telemetryLabels,
               onTraceStart: onTraceStartCallback,
@@ -272,7 +325,7 @@ export class ReflectionServer {
         } else {
           // Non-streaming: send JSON response
           const result = await action.run(input, {
-            context,
+            context: context || {},
             telemetryLabels,
             onTraceStart: onTraceStartCallback,
             abortSignal: abortController.signal,
@@ -388,7 +441,18 @@ export class ReflectionServer {
         `Reflection server (${process.pid}) running on http://localhost:${this.port}`
       );
       ReflectionServer.RUNNING_SERVERS.push(this);
-      await this.writeRuntimeFile();
+
+      try {
+        await this.registry.listActions();
+        await this.writeRuntimeFile();
+      } catch (e) {
+        logger.error(`Error initializing plugins: ${e}`);
+        try {
+          await this.stop();
+        } catch (err) {
+          logger.error(`Failed to stop server gracefully: ${err}`);
+        }
+      }
     });
   }
 
@@ -396,6 +460,15 @@ export class ReflectionServer {
    * Stops the server and removes it from the list of running servers to clean up on exit.
    */
   async stop(): Promise<void> {
+    if (this.v2Server) {
+      await this.v2Server.stop();
+      const index = ReflectionServer.RUNNING_SERVERS.indexOf(this);
+      if (index > -1) {
+        ReflectionServer.RUNNING_SERVERS.splice(index, 1);
+      }
+      return;
+    }
+
     if (!this.server) {
       return;
     }

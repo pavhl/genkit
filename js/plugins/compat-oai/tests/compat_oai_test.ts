@@ -171,6 +171,21 @@ describe('toOpenAiTextAndMedia', () => {
     });
   });
 
+  it('should transform image from signed URLs', () => {
+    const part: Part = {
+      media: {
+        url: 'https://storage.googleapis.com/bucket/image.png?X-Goog-Signature=fake',
+      },
+    };
+    expect(toOpenAITextAndMedia(part, 'low')).toStrictEqual({
+      type: 'image_url',
+      image_url: {
+        url: 'https://storage.googleapis.com/bucket/image.png?X-Goog-Signature=fake',
+        detail: 'low',
+      },
+    });
+  });
+
   it('should throw error for file URLs (non-base64 PDFs)', () => {
     const part: Part = {
       media: {
@@ -194,7 +209,7 @@ describe('toOpenAiTextAndMedia', () => {
 describe('toOpenAiMessages', () => {
   const testCases = [
     {
-      should: 'should transform tool request content correctly',
+      should: 'transform tool request content correctly',
       inputMessages: [
         {
           role: 'model',
@@ -226,7 +241,7 @@ describe('toOpenAiMessages', () => {
       ],
     },
     {
-      should: 'should transform tool response text content correctly',
+      should: 'transform tool response text content correctly',
       inputMessages: [
         {
           role: 'tool',
@@ -250,7 +265,7 @@ describe('toOpenAiMessages', () => {
       ],
     },
     {
-      should: 'should transform tool response json content correctly',
+      should: 'transform tool response json content correctly',
       inputMessages: [
         {
           role: 'tool',
@@ -274,7 +289,7 @@ describe('toOpenAiMessages', () => {
       ],
     },
     {
-      should: 'should transform text content correctly',
+      should: 'transform text content correctly',
       inputMessages: [
         { role: 'user', content: [{ text: 'hi' }] },
         { role: 'model', content: [{ text: 'how can I help you?' }] },
@@ -287,7 +302,7 @@ describe('toOpenAiMessages', () => {
       ],
     },
     {
-      should: 'should transform multi-modal (text + media) content correctly',
+      should: 'transform multi-modal (text + media) content correctly',
       inputMessages: [
         {
           role: 'user',
@@ -319,7 +334,7 @@ describe('toOpenAiMessages', () => {
       ],
     },
     {
-      should: 'should transform system messages correctly',
+      should: 'transform system messages correctly',
       inputMessages: [
         { role: 'system', content: [{ text: 'system message' }] },
       ],
@@ -408,7 +423,7 @@ describe('fromOpenAiChoice', () => {
     expectedOutput: GenerateResponseData;
   }[] = [
     {
-      should: 'should work with text',
+      should: 'work with text',
       choice: {
         index: 0,
         message: {
@@ -428,7 +443,7 @@ describe('fromOpenAiChoice', () => {
       },
     },
     {
-      should: 'should work with json',
+      should: 'work with json',
       choice: {
         index: 0,
         message: {
@@ -449,7 +464,7 @@ describe('fromOpenAiChoice', () => {
       },
     },
     {
-      should: 'should work with tools',
+      should: 'work with tools',
       choice: {
         index: 0,
         message: {
@@ -487,7 +502,7 @@ describe('fromOpenAiChoice', () => {
       },
     },
     {
-      should: 'should work with reasoning_content',
+      should: 'work with reasoning_content',
       choice: {
         index: 0,
         message: {
@@ -508,7 +523,7 @@ describe('fromOpenAiChoice', () => {
       },
     },
     {
-      should: 'should work with both reasoning_content and content',
+      should: 'work with both reasoning_content and content',
       choice: {
         index: 0,
         message: {
@@ -525,6 +540,27 @@ describe('fromOpenAiChoice', () => {
         message: {
           role: 'model',
           content: [{ reasoning: 'Let me think...' }, { text: 'Final answer' }],
+        },
+      },
+    },
+    {
+      should: 'not ignore content when tool_calls is an empty array',
+      choice: {
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: 'I have the answer.',
+          tool_calls: [],
+          refusal: null,
+        },
+        finish_reason: 'stop',
+        logprobs: null,
+      },
+      expectedOutput: {
+        finishReason: 'stop',
+        message: {
+          role: 'model',
+          content: [{ text: 'I have the answer.' }],
         },
       },
     },
@@ -546,7 +582,7 @@ describe('fromOpenAiChunkChoice', () => {
     expectedOutput: GenerateResponseData;
   }[] = [
     {
-      should: 'should work with text',
+      should: 'work with text',
       chunkChoice: {
         index: 0,
         delta: {
@@ -564,7 +600,7 @@ describe('fromOpenAiChunkChoice', () => {
       },
     },
     {
-      should: 'should work with json',
+      should: 'work with json',
       chunkChoice: {
         index: 0,
         delta: {
@@ -584,7 +620,7 @@ describe('fromOpenAiChunkChoice', () => {
       },
     },
     {
-      should: 'should work with tools',
+      should: 'work with tools',
       chunkChoice: {
         index: 0,
         delta: {
@@ -620,7 +656,7 @@ describe('fromOpenAiChunkChoice', () => {
       },
     },
     {
-      should: 'should work with reasoning_content',
+      should: 'work with reasoning_content',
       chunkChoice: {
         index: 0,
         delta: {
@@ -638,7 +674,7 @@ describe('fromOpenAiChunkChoice', () => {
       },
     },
     {
-      should: 'should work with both reasoning_content and content',
+      should: 'work with both reasoning_content and content',
       chunkChoice: {
         index: 0,
         delta: {

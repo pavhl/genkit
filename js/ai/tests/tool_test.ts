@@ -23,6 +23,9 @@ import {
   defineInterrupt,
   defineTool,
   isDynamicTool,
+  isMultipartTool,
+  respondTool,
+  restartTool,
   tool,
 } from '../src/tool.js';
 
@@ -134,6 +137,28 @@ describe('defineInterrupt', () => {
       });
     });
 
+    it('should define a multipart tool returning metadata', async () => {
+      const t = defineTool(
+        registry,
+        { name: 'test_meta', description: 'test', multipart: true },
+        async () => {
+          return {
+            output: 'main output',
+            content: [{ text: 'part 1' }],
+            metadata: { customField: 123 },
+          };
+        }
+      );
+      assert.equal(t.__action.metadata.type, 'tool.v2');
+      assert.equal(t.__action.actionType, 'tool.v2');
+      const result = await t({});
+      assert.deepStrictEqual(result, {
+        output: 'main output',
+        content: [{ text: 'part 1' }],
+        metadata: { customField: 123 },
+      });
+    });
+
     it('should handle fallback output', async () => {
       const t = defineTool(
         registry,
@@ -162,6 +187,15 @@ describe('isDynamicTool', () => {
 
   it('should return true for a dynamic tool', () => {
     const dynamic = tool({ name: 'dynamic', description: 'test' });
+    assert.strictEqual(isDynamicTool(dynamic), true);
+  });
+
+  it('should return true for a dynamic multipart tool', () => {
+    const dynamic = tool({
+      name: 'dynamic',
+      description: 'test',
+      multipart: true,
+    });
     assert.strictEqual(isDynamicTool(dynamic), true);
   });
 
@@ -195,6 +229,47 @@ describe('isDynamicTool', () => {
     assert.strictEqual(isDynamicTool({}), false);
     assert.strictEqual(isDynamicTool('tool'), false);
     assert.strictEqual(isDynamicTool(123), false);
+  });
+});
+
+describe('isMultipartTool', () => {
+  let registry = new Registry();
+  registry.apiStability = 'beta';
+  afterEach(() => {
+    registry = new Registry();
+    registry.apiStability = 'beta';
+  });
+
+  it('should return true for a multipart tool', () => {
+    const multipart = defineTool(
+      registry,
+      { name: 'multipart', description: 'test', multipart: true },
+      async () => {}
+    );
+    assert.strictEqual(isMultipartTool(multipart), true);
+  });
+
+  it('should return false for a non-multipart tool', () => {
+    const regular = defineTool(
+      registry,
+      { name: 'regular', description: 'test' },
+      async () => {}
+    );
+    assert.strictEqual(isMultipartTool(regular), false);
+  });
+
+  it('should return false for a non-tool action', () => {
+    const regularAction = action(
+      { actionType: 'util', name: 'regularAction', description: 'test' },
+      async () => {}
+    );
+    assert.strictEqual(isMultipartTool(regularAction), false);
+  });
+
+  it('should return false for a non-action', () => {
+    assert.strictEqual(isMultipartTool({}), false);
+    assert.strictEqual(isMultipartTool('tool'), false);
+    assert.strictEqual(isMultipartTool(123), false);
   });
 });
 
@@ -383,5 +458,68 @@ describe('defineTool', () => {
     assert.ok(action);
     const result = await action!({});
     assert.deepStrictEqual(result, { output: 'foo' });
+  });
+});
+
+describe('respondTool', () => {
+  it('constructs a ToolResponsePart standalone', () => {
+    const interrupt = { toolRequest: { name: 'test', input: {} } };
+    assert.deepStrictEqual(respondTool(interrupt, 'output'), {
+      toolResponse: {
+        name: 'test',
+        output: 'output',
+      },
+      metadata: {
+        interruptResponse: true,
+      },
+    });
+  });
+
+  it('includes metadata standalone', () => {
+    const interrupt = { toolRequest: { name: 'test', input: {} } };
+    assert.deepStrictEqual(
+      respondTool(interrupt, 'output', { metadata: { extra: 'data' } }),
+      {
+        toolResponse: {
+          name: 'test',
+          output: 'output',
+        },
+        metadata: {
+          interruptResponse: { extra: 'data' },
+        },
+      }
+    );
+  });
+});
+
+describe('restartTool', () => {
+  it('constructs a ToolRequestPart standalone', () => {
+    const interrupt = { toolRequest: { name: 'test', input: {} } };
+    assert.deepStrictEqual(restartTool(interrupt), {
+      toolRequest: {
+        name: 'test',
+        input: {},
+      },
+      metadata: {
+        resumed: true,
+      },
+    });
+  });
+
+  it('allows replacing input standalone', () => {
+    const interrupt = { toolRequest: { name: 'test', input: {} } };
+    assert.deepStrictEqual(
+      restartTool(interrupt, undefined, { replaceInput: 'new' }),
+      {
+        toolRequest: {
+          name: 'test',
+          input: 'new',
+        },
+        metadata: {
+          resumed: true,
+          replacedInput: {},
+        },
+      }
+    );
   });
 });

@@ -32,6 +32,7 @@ import (
 	"github.com/firebase/genkit/go/core"
 	"github.com/firebase/genkit/go/core/api"
 	"github.com/firebase/genkit/go/core/logger"
+	"github.com/firebase/genkit/go/core/x/session"
 	"github.com/firebase/genkit/go/internal/base"
 	"github.com/google/dotprompt/go/dotprompt"
 	"github.com/invopop/jsonschema"
@@ -103,6 +104,11 @@ func DefinePrompt(r api.Registry, name string, opts ...PromptOption) Prompt {
 
 	baseName, variant, _ := strings.Cut(name, ".")
 
+	use, err := configsToRefs(pOpts.commonGenOptions.Use)
+	if err != nil {
+		panic(fmt.Errorf("ai.DefinePrompt: error processing middleware: %w", err))
+	}
+
 	promptMetadata := map[string]any{
 		"name":         baseName,
 		"description":  p.Description,
@@ -112,7 +118,11 @@ func DefinePrompt(r api.Registry, name string, opts ...PromptOption) Prompt {
 		"output":       map[string]any{"schema": p.OutputSchema},
 		"defaultInput": p.DefaultInput,
 		"tools":        tools,
+		"toolChoice":   pOpts.ToolChoice,
 		"maxTurns":     p.MaxTurns,
+	}
+	if len(use) > 0 {
+		promptMetadata["use"] = use
 	}
 	if variant != "" {
 		promptMetadata["variant"] = variant
@@ -246,6 +256,14 @@ func (p *prompt) Execute(ctx context.Context, opts ...PromptExecuteOption) (*Mod
 		for _, t := range newTools {
 			t.Register(r)
 		}
+	}
+
+	refs, err := configsToRefs(execOpts.Use)
+	if err != nil {
+		return nil, fmt.Errorf("Prompt.Execute: %w", err)
+	}
+	if len(refs) > 0 {
+		actionOpts.Use = refs
 	}
 
 	return GenerateWithRequest(ctx, r, actionOpts, execOpts.Middleware, execOpts.Stream)
@@ -438,6 +456,11 @@ func (p *prompt) buildRequest(ctx context.Context, input any) (*GenerateActionOp
 		return nil, core.NewError(core.INVALID_ARGUMENT, "invalid output schema for prompt %q: %v", p.Name(), err)
 	}
 
+	useRefs, err := configsToRefs(p.Use)
+	if err != nil {
+		return nil, fmt.Errorf("prompt %q: %w", p.Name(), err)
+	}
+
 	return &GenerateActionOptions{
 		Model:              modelName,
 		Config:             config,
@@ -446,6 +469,7 @@ func (p *prompt) buildRequest(ctx context.Context, input any) (*GenerateActionOp
 		ReturnToolRequests: p.ReturnToolRequests != nil && *p.ReturnToolRequests,
 		Messages:           messages,
 		Tools:              tools,
+		Use:                useRefs,
 		Output: &GenerateActionOutputConfig{
 			Format:       p.OutputFormat,
 			JsonSchema:   outputSchema,
@@ -466,13 +490,16 @@ func renderSystemPrompt(ctx context.Context, opts promptOptions, messages []*Mes
 		return nil, err
 	}
 
-	parts, err := renderPrompt(ctx, opts, templateText, input, dp)
+	renderedMessages, err := renderPrompt(ctx, opts, templateText, input, dp)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(parts) != 0 {
-		messages = append(messages, NewSystemMessage(parts...))
+	for _, m := range renderedMessages {
+		if m.Role == "" || (len(renderedMessages) == 1 && m.Role == RoleUser) {
+			m.Role = RoleSystem
+		}
+		messages = append(messages, m)
 	}
 
 	return messages, nil
@@ -489,13 +516,16 @@ func renderUserPrompt(ctx context.Context, opts promptOptions, messages []*Messa
 		return nil, err
 	}
 
-	parts, err := renderPrompt(ctx, opts, templateText, input, dp)
+	renderedMessages, err := renderPrompt(ctx, opts, templateText, input, dp)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(parts) != 0 {
-		messages = append(messages, NewUserMessage(parts...))
+	for _, m := range renderedMessages {
+		if m.Role == "" || (len(renderedMessages) == 1 && m.Role != RoleUser) {
+			m.Role = RoleUser
+		}
+		messages = append(messages, m)
 	}
 
 	return messages, nil
@@ -515,71 +545,105 @@ func renderMessages(ctx context.Context, opts promptOptions, messages []*Message
 	// Create new message copies to avoid mutating shared messages during concurrent execution
 	renderedMsgs := make([]*Message, 0, len(msgs))
 	for _, msg := range msgs {
-		msgParts := []*Part{}
+		hasTextPart := slices.ContainsFunc(msg.Content, (*Part).IsText)
+
+		if !hasTextPart {
+			// Create a new message with non-text content instead of mutating the original
+			renderedMsg := &Message{
+				Role:     msg.Role,
+				Content:  msg.Content,
+				Metadata: msg.Metadata,
+			}
+			renderedMsgs = append(renderedMsgs, renderedMsg)
+			continue
+		}
+
 		for _, part := range msg.Content {
 			if part.IsText() {
-				parts, err := renderPrompt(ctx, opts, part.Text, input, dp)
+				messagesFromText, err := renderPrompt(ctx, opts, part.Text, input, dp)
 				if err != nil {
 					return nil, err
 				}
-				msgParts = append(msgParts, parts...)
+				for _, m := range messagesFromText {
+					// If the rendered message has no role, or it is a single message with default role,
+					// use the original message's role.
+					role := m.Role
+					if role == "" || (len(messagesFromText) == 1 && role == RoleUser) {
+						role = msg.Role
+					}
+					renderedMsgs = append(renderedMsgs, &Message{
+						Role:     role,
+						Content:  m.Content,
+						Metadata: msg.Metadata,
+					})
+				}
 			} else {
-				// Preserve non-text parts as-is
-				msgParts = append(msgParts, part)
+				// Preserve non-text parts as-is in the current last message if possible, or create a new one
+				if len(renderedMsgs) > 0 && renderedMsgs[len(renderedMsgs)-1].Role == msg.Role {
+					renderedMsgs[len(renderedMsgs)-1].Content = append(renderedMsgs[len(renderedMsgs)-1].Content, part)
+				} else {
+					renderedMsgs = append(renderedMsgs, &Message{
+						Role:     msg.Role,
+						Content:  []*Part{part},
+						Metadata: msg.Metadata,
+					})
+				}
 			}
 		}
-		// Create a new message with rendered content instead of mutating the original
-		renderedMsg := &Message{
-			Role:     msg.Role,
-			Content:  msgParts,
-			Metadata: msg.Metadata,
-		}
-		renderedMsgs = append(renderedMsgs, renderedMsg)
 	}
 
 	return append(messages, renderedMsgs...), nil
 }
 
 // renderPrompt renders a prompt template using dotprompt functionalities
-func renderPrompt(ctx context.Context, opts promptOptions, templateText string, input map[string]any, dp *dotprompt.Dotprompt) ([]*Part, error) {
+func renderPrompt(ctx context.Context, opts promptOptions, templateText string, input map[string]any, dp *dotprompt.Dotprompt) ([]*Message, error) {
 	renderedFunc, err := dp.Compile(templateText, &dotprompt.PromptMetadata{})
 	if err != nil {
 		return nil, err
 	}
 
-	return renderDotpromptToParts(ctx, renderedFunc, input, &dotprompt.PromptMetadata{
+	return renderDotpromptToMessages(ctx, renderedFunc, input, &dotprompt.PromptMetadata{
 		Input: dotprompt.PromptMetadataInput{
 			Default: opts.DefaultInput,
 		},
 	})
 }
 
-// renderDotpromptToParts executes a dotprompt prompt function and converts the result to a slice of parts
-func renderDotpromptToParts(ctx context.Context, promptFn dotprompt.PromptFunction, input map[string]any, additionalMetadata *dotprompt.PromptMetadata) ([]*Part, error) {
+// renderDotpromptToMessages executes a dotprompt prompt function and converts the result to a slice of messages
+func renderDotpromptToMessages(ctx context.Context, promptFn dotprompt.PromptFunction, input map[string]any, additionalMetadata *dotprompt.PromptMetadata) ([]*Message, error) {
 	// Prepare the context for rendering
-	context := map[string]any{}
+	templateContext := map[string]any{}
 	actionCtx := core.FromContext(ctx)
-	maps.Copy(context, actionCtx)
+	maps.Copy(templateContext, actionCtx)
+
+	// Inject session state if available (accessible via {{@state.field}} in templates)
+	if state := session.StateFromContext(ctx); state != nil {
+		templateContext["state"] = state
+	}
 
 	// Call the prompt function with the input and context
 	rendered, err := promptFn(&dotprompt.DataArgument{
 		Input:   input,
-		Context: context,
+		Context: templateContext,
 	}, additionalMetadata)
 	if err != nil {
 		return nil, fmt.Errorf("failed to render prompt: %w", err)
 	}
 
-	convertedParts := []*Part{}
+	convertedMessages := []*Message{}
 	for _, message := range rendered.Messages {
 		parts, err := convertToPartPointers(message.Content)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert parts: %w", err)
 		}
-		convertedParts = append(convertedParts, parts...)
+		role := Role(message.Role)
+		convertedMessages = append(convertedMessages, &Message{
+			Role:    role,
+			Content: parts,
+		})
 	}
 
-	return convertedParts, nil
+	return convertedMessages, nil
 }
 
 // convertToPartPointers converts []dotprompt.Part to []*Part
@@ -732,6 +796,12 @@ func LoadPromptFromSource(r api.Registry, source, name, namespace string) (Promp
 		opts.ReturnToolRequests = &returnToolRequests
 	}
 
+	if uses, err := parseDotpromptUse(metadata.Raw["use"]); err != nil {
+		return nil, fmt.Errorf("prompt %q: %w", name, err)
+	} else if len(uses) > 0 {
+		opts.Use = uses
+	}
+
 	if inputSchema, ok := metadata.Input.Schema.(*jsonschema.Schema); ok {
 		if inputSchema.Ref != "" {
 			opts.InputSchema = core.SchemaRef(inputSchema.Ref)
@@ -741,7 +811,11 @@ func LoadPromptFromSource(r api.Registry, source, name, namespace string) (Promp
 	}
 
 	if inputSchema, ok := metadata.Input.Schema.(map[string]any); ok {
-		opts.InputSchema = inputSchema
+		if ref, ok := inputSchema["$ref"].(string); ok {
+			opts.InputSchema = core.SchemaRef(ref)
+		} else {
+			opts.InputSchema = inputSchema
+		}
 	}
 
 	if metadata.Output.Format != "" {
@@ -759,53 +833,56 @@ func LoadPromptFromSource(r api.Registry, source, name, namespace string) (Promp
 		}
 	}
 
+	if outputSchema, ok := metadata.Output.Schema.(map[string]any); ok {
+		if ref, ok := outputSchema["$ref"].(string); ok {
+			opts.OutputSchema = core.SchemaRef(ref)
+		} else {
+			opts.OutputSchema = outputSchema
+		}
+		if opts.OutputFormat == "" {
+			opts.OutputFormat = OutputFormatJSON
+		}
+	}
+
 	key := promptKey(name, variant, namespace)
 
-	dpMessages, err := dotprompt.ToMessages(parsedPrompt.Template, &dotprompt.DataArgument{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert prompt template to messages: %w", err)
-	}
-
-	var systemText string
-	var nonSystemMessages []*Message
-	for _, dpMsg := range dpMessages {
-		parts, err := convertToPartPointers(dpMsg.Content)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert message parts: %w", err)
-		}
-
-		role := Role(dpMsg.Role)
-		if role == RoleSystem {
-			var textParts []string
-			for _, part := range parts {
-				if part.IsText() {
-					textParts = append(textParts, part.Text)
-				}
-			}
-
-			if len(textParts) > 0 {
-				systemText = strings.Join(textParts, " ")
-			}
-		} else {
-			nonSystemMessages = append(nonSystemMessages, &Message{Role: role, Content: parts})
-		}
-	}
-
-	promptOpts := []PromptOption{opts}
-
-	if systemText != "" {
-		promptOpts = append(promptOpts, WithSystem(systemText))
-	}
-
-	if len(nonSystemMessages) > 0 {
-		promptOpts = append(promptOpts, WithMessages(nonSystemMessages...))
-	} else if systemText == "" {
-		promptOpts = append(promptOpts, WithPrompt(parsedPrompt.Template))
-	}
-
-	prompt := DefinePrompt(r, key, promptOpts...)
+	prompt := DefinePrompt(r, key, opts, WithPrompt(parsedPrompt.Template))
 
 	return prompt, nil
+}
+
+// parseDotpromptUse converts the value of the dotprompt `use:` frontmatter
+// field into a slice of lazy [Middleware] references. Each entry may be a
+// bare string (interpreted as a registered middleware name) or a map with
+// `name` and optional `config`, mirroring the TypeScript MiddlewareRef shape.
+// Returns nil if the input is nil or an empty slice.
+func parseDotpromptUse(raw any) ([]Middleware, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	entries, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("`use` must be a list, got %T", raw)
+	}
+	uses := make([]Middleware, 0, len(entries))
+	for i, entry := range entries {
+		switch v := entry.(type) {
+		case string:
+			if v == "" {
+				return nil, fmt.Errorf("`use[%d]` is an empty string", i)
+			}
+			uses = append(uses, middlewareRefArg{name: v})
+		case map[string]any:
+			name, _ := v["name"].(string)
+			if name == "" {
+				return nil, fmt.Errorf("`use[%d]` is missing required `name` field", i)
+			}
+			uses = append(uses, middlewareRefArg{name: name, config: v["config"]})
+		default:
+			return nil, fmt.Errorf("`use[%d]` must be a string or map, got %T", i, entry)
+		}
+	}
+	return uses, nil
 }
 
 // LoadPromptDir loads prompts and partials from a directory on the local filesystem.
@@ -956,6 +1033,10 @@ func (dp *DataPrompt[In, Out]) ExecuteStream(ctx context.Context, input In, opts
 			if err != nil {
 				yield(nil, err)
 				return err
+			}
+			// Skip yielding if there's no parseable output yet (e.g., incomplete JSON during streaming).
+			if base.IsNil(streamValue) {
+				return nil
 			}
 			if !yield(&StreamValue[Out, Out]{Chunk: streamValue}, nil) {
 				return errGenerateStop

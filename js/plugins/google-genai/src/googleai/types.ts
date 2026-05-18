@@ -38,6 +38,10 @@ import {
   ToolConfig,
   UrlContextTool,
 } from '../common/types.js';
+import {
+  CreateInteractionRequest,
+  GeminiInteraction,
+} from './interaction-types.js';
 
 // This makes it easier to import all types from one place.
 export {
@@ -46,6 +50,8 @@ export {
   HarmCategory,
   TaskTypeSchema,
   type Content,
+  type CreateInteractionRequest,
+  type GeminiInteraction,
   type GenerateContentCandidate,
   type GenerateContentRequest,
   type GenerateContentResponse,
@@ -193,6 +199,8 @@ export declare interface VeoParameters {
   personGeneration?: string;
   durationSeconds?: number;
   enhancePrompt?: boolean;
+  resolution?: string;
+  seed?: number;
 }
 
 export declare interface VeoInstance {

@@ -23,8 +23,10 @@ import {
 } from '../common/utils.js';
 import {
   ClientOptions,
+  CreateInteractionRequest,
   EmbedContentRequest,
   EmbedContentResponse,
+  GeminiInteraction,
   GenerateContentRequest,
   GenerateContentResponse,
   GenerateContentStreamResult,
@@ -35,6 +37,114 @@ import {
   VeoOperation,
   VeoPredictRequest,
 } from './types.js';
+
+/**
+ * Creates an interaction using the Google AI API.
+ *
+ * @param apiKey The API key to authenticate the request.
+ * @param createInteractionRequest The request object containing the interaction parameters.
+ * @param clientOptions Optional options to customize the request
+ * @returns A promise that resolves to the interaction response.
+ */
+export async function createInteraction(
+  apiKey: string | undefined,
+  createInteractionRequest: CreateInteractionRequest,
+  clientOptions?: ClientOptions
+): Promise<GeminiInteraction> {
+  const url = getGoogleAIUrl({
+    resourcePath: 'interactions',
+    clientOptions,
+  });
+
+  const fetchOptions = getFetchOptions({
+    method: 'POST',
+    apiKey,
+    clientOptions,
+    body: JSON.stringify(createInteractionRequest),
+    isInteraction: true,
+  });
+
+  const response = await makeRequest(url, fetchOptions);
+  const responseJson = await response.json();
+
+  return responseJson;
+}
+
+/**
+ * Gets an interaction using the Google AI API.
+ *
+ * @param apiKey The API key to authenticate the request.
+ * @param interactionId The ID of the interaction to retrieve.
+ * @param clientOptions Optional options to customize the request
+ * @returns A promise that resolves to the interaction response.
+ */
+export async function getInteraction(
+  apiKey: string | undefined,
+  interactionId: string,
+  clientOptions?: ClientOptions
+): Promise<GeminiInteraction> {
+  const url = getGoogleAIUrl({
+    resourcePath: `interactions/${interactionId}`,
+    clientOptions,
+  });
+
+  const fetchOptions = getFetchOptions({
+    method: 'GET',
+    apiKey,
+    clientOptions,
+    isInteraction: true,
+  });
+
+  const response = await makeRequest(url, fetchOptions);
+  const responseJson = await response.json();
+
+  return responseJson;
+}
+
+/**
+ * Cancels an interaction using the Google AI API.
+ *
+ * @param apiKey The API key to authenticate the request.
+ * @param interactionId The ID of the interaction to cancel.
+ * @param clientOptions Optional options to customize the request
+ * @returns A promise that resolves to the interaction response.
+ */
+export async function cancelInteraction(
+  apiKey: string | undefined,
+  interactionId: string,
+  clientOptions?: ClientOptions
+): Promise<GeminiInteraction> {
+  const url = getGoogleAIUrl({
+    resourcePath: `interactions/${interactionId}/cancel`,
+    clientOptions,
+  });
+  const fetchOptions = getFetchOptions({
+    method: 'POST',
+    apiKey,
+    clientOptions,
+    isInteraction: true,
+  });
+
+  try {
+    await makeRequest(url, fetchOptions);
+    // A successful cancellation will actually throw a
+    // CANCELLED error. If we instead get a 200 OK here, then
+    // it can mean a no-op cancellation (e.g. race condition between finish and cancelled)
+    // We throw an error here so the exit logic is the same for both cases.
+    throw new GenkitError({
+      status: 'CANCELLED',
+      message: 'successfully cancelled',
+    });
+  } catch (e: any) {
+    if (e instanceof GenkitError && e.status === 'CANCELLED') {
+      return {
+        id: interactionId,
+        status: 'cancelled',
+      } as GeminiInteraction;
+    }
+    throw e;
+  }
+}
 
 /**
  * Lists available models.
@@ -268,10 +378,15 @@ function getFetchOptions(params: {
   apiKey: string | undefined;
   body?: string;
   clientOptions?: ClientOptions;
+  isInteraction?: boolean;
 }) {
   const fetchOptions: RequestInit = {
     method: params.method,
-    headers: getHeaders(params.apiKey, params.clientOptions),
+    headers: getHeaders(
+      params.apiKey,
+      params.clientOptions,
+      params.isInteraction
+    ),
   };
   if (params.body) {
     fetchOptions.body = params.body;
@@ -311,7 +426,8 @@ function getAbortSignal(
  */
 function getHeaders(
   apiKey?: string,
-  clientOptions?: ClientOptions
+  clientOptions?: ClientOptions,
+  isInteraction?: boolean
 ): HeadersInit {
   let customHeaders = {};
   if (clientOptions?.customHeaders) {
@@ -324,6 +440,10 @@ function getHeaders(
     'Content-Type': 'application/json',
     'x-goog-api-client': getGenkitClientHeader(),
   };
+
+  if (isInteraction) {
+    headers['Api-Revision'] = '2026-05-20';
+  }
 
   if (apiKey) {
     headers['x-goog-api-key'] = apiKey;
@@ -349,10 +469,28 @@ async function makeRequest(
     if (!response.ok) {
       let errorText = await response.text();
       let errorMessage = errorText;
+      let errorDetail: unknown;
       try {
         const json = JSON.parse(errorText);
+        errorDetail = json;
         if (json.error && json.error.message) {
           errorMessage = json.error.message;
+          if (Array.isArray(json.error.details)) {
+            const detailsText = json.error.details
+              .map((d: any) => {
+                if (d.detail && typeof d.detail === 'string') {
+                  const match = d.detail.match(/\[ORIGINAL ERROR\]\s*([^[]+)/);
+                  const detailText = match ? match[1].trim() : d.detail;
+                  return `${detailText}\nRaw: ${JSON.stringify(d, null, 2)}`;
+                }
+                return JSON.stringify(d, null, 2);
+              })
+              .filter(Boolean)
+              .join('\n');
+            if (detailsText) {
+              errorMessage += `\nDetails:\n${detailsText}`;
+            }
+          }
         }
       } catch (e) {
         // Not JSON or expected format, use the raw text
@@ -365,6 +503,9 @@ async function makeRequest(
         case 400:
           status = 'INVALID_ARGUMENT';
           break;
+        case 499:
+          status = 'CANCELLED';
+          break;
         case 500:
           status = 'INTERNAL';
           break;
@@ -375,6 +516,7 @@ async function makeRequest(
       throw new GenkitError({
         status,
         message: `Error fetching from ${url}: [${response.status} ${response.statusText}] ${errorMessage}`,
+        detail: errorDetail,
       });
     }
     return response;

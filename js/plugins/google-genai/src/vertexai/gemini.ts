@@ -36,6 +36,7 @@ import {
   toGeminiSystemInstruction,
   toGeminiTool,
 } from '../common/converters.js';
+import { isKnownKey } from '../common/utils.js';
 import {
   generateContent,
   generateContentStream,
@@ -293,6 +294,14 @@ export const GeminiConfigSchema = GenerationCommonConfigSchema.extend({
     })
     .passthrough()
     .optional(),
+  payGo: z
+    .enum(['priority', 'priority-only', 'flex', 'flex-only'])
+    .describe(
+      'PayGo consumption options. Priority provides more consistent performance than Standard PayGo. ' +
+        'Flex is a cost-effective option for non-critical workloads. ' +
+        'The "-only" options use only PayGo and no Provisioned Throughput.'
+    )
+    .optional(),
   thinkingConfig: z
     .object({
       includeThoughts: z
@@ -381,7 +390,7 @@ export const GeminiImageConfigSchema = GeminiConfigSchema.extend({
           '21:9',
         ])
         .optional(),
-      imageSize: z.enum(['1K', '2K', '4K']).optional(),
+      imageSize: z.enum(['512', '1K', '2K', '4K']).optional(),
     })
     .passthrough()
     .optional(),
@@ -422,15 +431,12 @@ const GENERIC_IMAGE_MODEL = commonRef(
 );
 
 export const KNOWN_GEMINI_MODELS = {
+  'gemini-3.1-flash-lite-preview': commonRef('gemini-3.1-flash-lite-preview'),
+  'gemini-3.1-pro-preview': commonRef('gemini-3.1-pro-preview'),
   'gemini-3-flash-preview': commonRef('gemini-3-flash-preview'),
-  'gemini-3-pro-preview': commonRef('gemini-3-pro-preview'),
   'gemini-2.5-flash-lite': commonRef('gemini-2.5-flash-lite'),
   'gemini-2.5-pro': commonRef('gemini-2.5-pro'),
   'gemini-2.5-flash': commonRef('gemini-2.5-flash'),
-  'gemini-2.0-flash-001': commonRef('gemini-2.0-flash-001'),
-  'gemini-2.0-flash': commonRef('gemini-2.0-flash'),
-  'gemini-2.0-flash-lite': commonRef('gemini-2.0-flash-lite'),
-  'gemini-2.0-flash-lite-001': commonRef('gemini-2.0-flash-lite-001'),
 } as const;
 export type KnownGeminiModels = keyof typeof KNOWN_GEMINI_MODELS;
 export type GeminiModelName = `gemini-${string}`;
@@ -443,6 +449,11 @@ export function isGeminiModelName(value?: string): value is GeminiModelName {
 }
 
 export const KNOWN_IMAGE_MODELS = {
+  'gemini-3.1-flash-image-preview': commonRef(
+    'gemini-3.1-flash-image-preview',
+    { ...GENERIC_IMAGE_MODEL.info },
+    GeminiImageConfigSchema
+  ),
   'gemini-3-pro-image-preview': commonRef(
     'gemini-3-pro-image-preview',
     { ...GENERIC_IMAGE_MODEL.info },
@@ -471,6 +482,10 @@ export function model(
   config: ConfigSchema = {}
 ): ModelReference<ConfigSchemaType> {
   const name = checkModelName(version);
+
+  if (isKnownKey(name, KNOWN_MODELS)) {
+    return KNOWN_MODELS[name].withConfig(config);
+  }
 
   if (isImageModelName(name)) {
     return modelRef({
@@ -592,6 +607,7 @@ export function defineModel(
         location,
         safetySettings,
         labels: labelsFromConfig,
+        payGo,
         ...restOfConfig
       } = requestConfig;
 
@@ -599,6 +615,25 @@ export function defineModel(
         location,
         apiKey: apiKeyFromConfig,
       });
+
+      if (payGo) {
+        const payGoHeaders: Record<string, string> = {};
+        if (payGo === 'priority') {
+          payGoHeaders['X-Vertex-AI-LLM-Shared-Request-Type'] = 'priority';
+        } else if (payGo === 'priority-only') {
+          payGoHeaders['X-Vertex-AI-LLM-Request-Type'] = 'shared';
+          payGoHeaders['X-Vertex-AI-LLM-Shared-Request-Type'] = 'priority';
+        } else if (payGo === 'flex') {
+          payGoHeaders['X-Vertex-AI-LLM-Shared-Request-Type'] = 'flex';
+        } else if (payGo === 'flex-only') {
+          payGoHeaders['X-Vertex-AI-LLM-Request-Type'] = 'shared';
+          payGoHeaders['X-Vertex-AI-LLM-Shared-Request-Type'] = 'flex';
+        }
+        clientOpt.customHeaders = {
+          ...clientOpt.customHeaders,
+          ...payGoHeaders,
+        };
+      }
 
       const labels = toGeminiLabels(labelsFromConfig);
 
@@ -701,6 +736,15 @@ export function defineModel(
       };
 
       const modelVersion = versionFromConfig || extractVersion(ref);
+
+      if (isImageModelName(modelVersion)) {
+        if (!generateContentRequest.generationConfig!.responseModalities) {
+          generateContentRequest.generationConfig!.responseModalities = [
+            'TEXT',
+            'IMAGE',
+          ];
+        }
+      }
 
       if (jsonMode && request.output?.constrained) {
         if (pluginOptions?.legacyResponseSchema) {

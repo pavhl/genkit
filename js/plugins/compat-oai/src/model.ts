@@ -50,7 +50,7 @@ import type {
   CompletionChoice,
 } from 'openai/resources/index.mjs';
 import { PluginOptions } from './index.js';
-import { maybeCreateRequestScopedOpenAIClient } from './utils.js';
+import { maybeCreateRequestScopedOpenAIClient, toModelName } from './utils.js';
 
 const VisualDetailLevelSchema = z.enum(['auto', 'low', 'high']).optional();
 
@@ -177,7 +177,9 @@ export function toOpenAITextAndMedia(
     }
 
     // Check if this is an image type
-    if (isImageContentType(contentType)) {
+    // If no contentType is provided, preserve legacy behavior by treating the media
+    // as an image URL (e.g. signed URLs or remote images without metadata)
+    if (!contentType || isImageContentType(contentType)) {
       return {
         type: 'image_url',
         image_url: {
@@ -376,7 +378,7 @@ export function fromOpenAIChoice(
   // Build content array based on what's present in the message
   let content: Part[] = [];
 
-  if (toolRequestParts) {
+  if (toolRequestParts && toolRequestParts.length > 0) {
     content = toolRequestParts as ToolRequestPart[];
   } else {
     // Handle reasoning_content if present
@@ -424,7 +426,7 @@ export function fromOpenAIChunkChoice(
   // Build content array based on what's present in the delta
   let content: Part[] = [];
 
-  if (toolRequestParts) {
+  if (toolRequestParts && toolRequestParts.length > 0) {
     content = toolRequestParts as ToolRequestPart[];
   } else {
     // Handle reasoning_content if present
@@ -642,7 +644,7 @@ export function openAIModelRunner(
 
 /**
  * Method to define a new Genkit Model that is compatible with Open AI
- * Chat Completions API. 
+ * Chat Completions API.
  *
  * These models are to be used to chat with a large language model.
  *
@@ -666,15 +668,17 @@ export function defineCompatOpenAIModel<
   pluginOptions?: PluginOptions;
 }): ModelAction {
   const { name, client, pluginOptions, modelRef, requestBuilder } = params;
-  const modelName = name.substring(name.indexOf('/') + 1);
+  const modelName = toModelName(name, pluginOptions?.name);
+  const actionName =
+    modelRef?.name ?? `${pluginOptions?.name ?? 'compat-oai'}/${modelName}`;
 
   return model(
     {
-      name,
+      name: actionName,
       ...modelRef?.info,
       configSchema: modelRef?.configSchema,
     },
-    openAIModelRunner(modelName!, client, requestBuilder, pluginOptions)
+    openAIModelRunner(modelName, client, requestBuilder, pluginOptions)
   );
 }
 

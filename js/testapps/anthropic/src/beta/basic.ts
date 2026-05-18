@@ -22,15 +22,16 @@ const ai = genkit({
     // Default all flows in this sample to the beta surface
     anthropic({
       apiVersion: 'beta',
-      cacheSystemPrompt: true,
       apiKey: process.env.ANTHROPIC_API_KEY,
     }),
   ],
 });
 
-const betaHaiku = anthropic.model('claude-3-5-haiku', { apiVersion: 'beta' });
+const betaHaiku = anthropic.model('claude-haiku-4-5', { apiVersion: 'beta' });
 const betaSonnet = anthropic.model('claude-sonnet-4-5', { apiVersion: 'beta' });
 const betaOpus41 = anthropic.model('claude-opus-4-1', { apiVersion: 'beta' });
+const betaOpus46 = anthropic.model('claude-opus-4-6', { apiVersion: 'beta' });
+const betaOpus47 = anthropic.model('claude-opus-4-7', { apiVersion: 'beta' });
 
 const GreetingSchema = z.object({
   greeting: z.string(),
@@ -80,6 +81,43 @@ ai.defineFlow('anthropic-beta-opus41', async () => {
     prompt:
       'You are Claude Opus 4.1 on the beta API. Provide a brief greeting that confirms you are using the beta API.',
     config: { temperature: 0.6 },
+  });
+
+  return text;
+});
+
+ai.defineFlow('anthropic-beta-opus46-old-thinking', async () => {
+  const { text } = await ai.generate({
+    model: betaOpus46,
+    prompt: 'You are Claude Opus 4.6. Tell me a joke.',
+    config: {
+      thinking: {
+        enabled: true,
+        budgetTokens: 2048,
+      },
+    },
+  });
+
+  return text;
+});
+
+ai.defineFlow('anthropic-beta-opus47-new-thinking', async () => {
+  const { text } = await ai.generate({
+    model: betaOpus47,
+    prompt: 'You are Claude Opus 4.7. Summarize task budgets.',
+    config: {
+      output_config: {
+        effort: 'xhigh',
+        task_budget: {
+          type: 'tokens',
+          total: 20000,
+        },
+      },
+      thinking: {
+        adaptive: true,
+        display: 'summarized',
+      },
+    },
   });
 
   return text;
